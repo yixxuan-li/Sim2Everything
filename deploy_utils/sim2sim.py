@@ -38,7 +38,7 @@ class MujocoEnv(BaseEnv):
     def __init__(self, control_freq: int = 100, 
                  joint_order: list[str] | None = None,
                  action_joint_names: list[str] | None = None,
-                 model_path: str = '', 
+                 xml_path: str = '', 
                  simulation_freq: int = 1000,
                  joint_armature: float = 0.01, 
                  joint_damping: float = 0.1, 
@@ -58,7 +58,7 @@ class MujocoEnv(BaseEnv):
             control_freq: Control frequency in Hz (must be <= simulation_freq)
             joint_order: List of joint names specifying the order of joints for control and observation.
             action_joint_names: List of joint names that are actuated (subset of joint_order).
-            model_path: Path to the MuJoCo XML model file
+            xml_path: Path to the MuJoCo XML model file
             simulation_freq: Simulation frequency in Hz
             joint_armature: Joint armature (motor inertia) value
             joint_damping: Joint damping value
@@ -69,7 +69,7 @@ class MujocoEnv(BaseEnv):
         super().__init__(control_freq=control_freq,
                          joint_order=joint_order,
                          action_joint_names=action_joint_names,
-                         model_path=model_path,
+                         xml_path=xml_path,
                          simulation_freq=simulation_freq,
                          joint_armature=joint_armature,
                          joint_damping=joint_damping,
@@ -82,7 +82,7 @@ class MujocoEnv(BaseEnv):
                          init_rclpy=init_rclpy,
                          spin_timeout=spin_timeout,
                          **kwargs) # check kwargs
-        self.model_path = model_path
+        self.xml_path = xml_path
         self.control_freq = control_freq
         self.simulation_freq = simulation_freq
         self.joint_armature = joint_armature
@@ -104,7 +104,7 @@ class MujocoEnv(BaseEnv):
         self.decimation = int(simulation_freq / control_freq)
         
         # Load model
-        self.model = mujoco.MjModel.from_xml_path(model_path) # type: ignore
+        self.model = mujoco.MjModel.from_xml_path(xml_path) # type: ignore
         # Setup simulation
         self._setup_joint_armature()
         self._setup_joint_damping(joint_damping)
@@ -173,6 +173,7 @@ class MujocoEnv(BaseEnv):
         self.register_input_callback('h', self.show_help)
         self.register_input_callback('p', self._set_random_targets)
         self.register_input_callback('z', self._set_zero_targets)
+        self.step_lock = threading.Lock()
 
         # ros control
         if self.enable_ros_control:
@@ -204,7 +205,7 @@ class MujocoEnv(BaseEnv):
         self.need_reset = False
         
         print(f"MuJoCo Environment initialized:")
-        print(f"  Model: {model_path}")
+        print(f"  Model: {xml_path}")
         print(f"  Joints: {self.num_joints} (excluding root)")
         print(f"  Actuators: {len(self.data.ctrl)}")
         print(f"  Simulation frequency: {simulation_freq} Hz")
@@ -266,6 +267,7 @@ class MujocoEnv(BaseEnv):
         print(f"Set simulation frequency to {self.simulation_freq} Hz (timestep: {dt:.6f} s)")
 
     def _update_model_actuator_gains(self):
+        # WARNING: This function is deprecated
         """Update MuJoCo model actuator gains if using position actuators"""
         # Check if any actuators are position actuators
         for i in range(self.model.nu):
@@ -285,6 +287,8 @@ class MujocoEnv(BaseEnv):
         Args:
             fix_root: If True, fix the root joint to make the robot static/floating
         """
+        self.step_lock.acquire()
+
         # Reset all joint positions and velocities
         self.data.qpos[:] = self.model.qpos0[:]
         self.data.qvel[:] = 0.0
@@ -312,6 +316,7 @@ class MujocoEnv(BaseEnv):
         self.need_reset = False
         
         print(f"Robot reset! Root {'fixed (floating)' if fix_root else 'free'}")
+        self.step_lock.release()
 
     def set_root_fixed(self, fixed=False):
         """Set root fixed"""
@@ -470,6 +475,12 @@ class MujocoEnv(BaseEnv):
         
         # Get target positions for the joints we're controlling
         target_positions = self.target_positions[self.joint_order]
+        if self.clip_action_to_torque_limit:
+            p_term = (target_positions - current_positions) * self.kp[self.joint_order]
+            d_term = (0.0 - current_velocities) * self.kd[self.joint_order]
+            control_torques = p_term + d_term
+            control_torques = np.clip(control_torques, -self.torque_limits.numpy(), self.torque_limits.numpy())
+            self.target_positions[self.joint_order] = (control_torques - d_term) / self.kp[self.joint_order] + current_positions # clip to torque limits
         
         # Compute PD control torques: tau = kp * (target_pos - current_pos) + kd * (0 - current_vel)
         position_errors = target_positions - current_positions
@@ -482,6 +493,9 @@ class MujocoEnv(BaseEnv):
         # Compute control torques
         control_torques = kp_control * position_errors + kd_control * velocity_errors
         
+        # Clip control torques to torque limits
+        if self.clip_action_to_torque_limit:
+            control_torques = np.clip(control_torques, -self.torque_limits.numpy(), self.torque_limits.numpy())
         # Apply torques to the actuators
         self.data.ctrl[self.joint_order] = control_torques
 
@@ -506,6 +520,7 @@ class MujocoEnv(BaseEnv):
         Returns:
             bool: True if simulation is still running, False if it should stop
         """
+        self.step_lock.acquire()
         if self.enable_ros_control and actions is not None:
             raise ValueError("When enable_ros_control is true, actions should no be passed to step")
         if self.enable_ros_control:
@@ -581,6 +596,7 @@ class MujocoEnv(BaseEnv):
             elapsed = time.time() - start_time
             if elapsed < control_period - self.release_time_delta:
                 time.sleep(control_period - self.release_time_delta - elapsed)
+        self.step_lock.release()
         return True
     
     def _set_random_targets(self, range_min=-0.2, range_max=0.2):
@@ -677,7 +693,7 @@ def main():
 
     # Create environment
     env = MujocoEnv(
-        model_path=os.path.join(abs_dir, 'assets/h1_2.xml'),
+        xml_path=os.path.join(abs_dir, 'assets/h1_2.xml'),
         simulation_freq=1000,
         control_freq=50,
         joint_armature=0.1,

@@ -178,7 +178,7 @@ class UnitreeEnv(BaseEnv, Node):
 
         # Initialize step frequency computation
         self.step_times = []
-        self.max_record_steps = 50
+        self.max_record_steps = 10
         self.last_step_time = time.monotonic()
 
         # Get joint order
@@ -387,8 +387,16 @@ class UnitreeEnv(BaseEnv, Node):
     
     def apply_pd_control(self):
         """Apply PD control using current target positions"""
-        # For position actuators, we just set the target positions
-        # MuJoCo will automatically apply PD control
+        # For PD actuators, we just set the target positions
+        # if clip_action_to_torque_limit is True, we clip the target positions to the torque limits
+        if self.clip_action_to_torque_limit:
+            p_term = (self.target_positions - self.joint_pos) * self.kp
+            d_term = (0.0 - self.joint_vel) * self.kd
+            tau_est = p_term + d_term
+            tau_est = torch.clamp(tau_est, -self.torque_limits, self.torque_limits)
+            self.target_positions[:] = (tau_est - d_term) / self.kp + self.joint_pos # clip to torque limits
+
+        # publish motor commands
         for i in range(self.num_joints):
             self.motor_cmd[i].q = self.target_positions[i].item()
         self.lowcmd.motor_cmd = self.motor_cmd.copy()
@@ -404,9 +412,7 @@ class UnitreeEnv(BaseEnv, Node):
 
     def step_complete(self):
         """Check if the simulation step is complete"""
-        step_complete = time.monotonic() - self.last_publish_time > self.control_dt - self.release_time_delta
-        if step_complete:
-            rclpy.spin_once(self, timeout_sec=self.spin_timeout)
+        step_complete = time.monotonic() - self.last_publish_time > max(self.control_dt - self.release_time_delta, 0.0)
         return step_complete
     
     def step(self, actions=None):
@@ -432,23 +438,26 @@ class UnitreeEnv(BaseEnv, Node):
 
         # Update step count
         self.step_count += 1
-        
+
         # Apply PD control
         self.apply_pd_control()
+        # Compute step frequency
+        self.step_times.append(time.monotonic() - self.last_publish_time)
+        # print(f"Step time: {self.step_times[-1]}")
+        # Update last publish time
         self.last_publish_time = time.monotonic()
 
-        # Compute step frequency
-        self.step_times.append(time.monotonic() - self.last_step_time)
-        self.last_step_time = time.monotonic()
         if len(self.step_times) > self.max_record_steps:
             self.step_times.pop(0)
 
         if self.align_time:
             frequency = self.step_frequency
+            # print(f"Frequency: {frequency}")
             if frequency > self.control_freq + self.align_tolerance:
                 self.release_time_delta -= self.align_step_size
             elif frequency < self.control_freq - self.align_tolerance:
                 self.release_time_delta += self.align_step_size
+            # print(f"Release time delta: {self.release_time_delta}")
             self.release_time_delta = max(0.0, self.release_time_delta)
             self.release_time_delta = min(self.control_dt, self.release_time_delta)
         return True

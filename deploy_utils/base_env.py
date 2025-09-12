@@ -21,6 +21,8 @@ class BaseEnv:
                  joint_order: list[str] | None = None,
                  action_joint_names: list[str] | None = None,
                  joint_limits: list[tuple[float, float]] | np.ndarray | None = None,
+                 torque_limits: list[tuple[float, float]] | np.ndarray | None = None,
+                 clip_action_to_torque_limit: bool = False,
                  release_time_delta: float = 0.0,
                  align_time: bool = True,
                  align_step_size: float = 0.00005,
@@ -37,7 +39,7 @@ class BaseEnv:
                  emergency_stop_breakpoint: bool = True,
 
                  # Simulation only
-                 model_path: str = '', 
+                 xml_path: str = '', 
                  simulation_freq: int = 1000,
                  joint_armature: float = 0.01, 
                  joint_damping: float = 0.1, 
@@ -60,6 +62,14 @@ class BaseEnv:
         self.terminal_input_callbacks: list[Callable] = []
         self.launch_input_thread: bool = launch_input_thread
         self.joint_limits: list[tuple[float, float]] | np.ndarray | None = joint_limits
+        self.torque_limits: list[tuple[float, float]] | np.ndarray | None = torque_limits
+        if isinstance(self.torque_limits, (list, tuple)):
+            self.torque_limits = torch.tensor(self.torque_limits)
+        elif isinstance(self.torque_limits, np.ndarray):
+            self.torque_limits = torch.from_numpy(self.torque_limits)
+        self.clip_action_to_torque_limit = clip_action_to_torque_limit
+        if self.clip_action_to_torque_limit:
+            assert self.torque_limits is not None, "torque_limits must be provided when using clip_action_to_torque_limit"
 
         # Emergency stop hooks
         self.emergency_stop_hooks: list[Callable] = []
@@ -163,9 +173,10 @@ class BaseEnv:
     def _apply_noise(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if not self.simulated or self.noise_level == 0.0:
             return data
-        for key, value in data.items():
-            if key in self.noise_scales:
-                data[key] = value + _noise_like(value, self.noise_type) * self.noise_scales[key] * self.noise_level
+        # ignore noise
+        # for key, value in data.items():
+        #     if key in self.noise_scales:
+        #         data[key] = value + _noise_like(value, self.noise_type) * self.noise_scales[key] * self.noise_level
         return data
 
     def run_simulation(self, max_steps: int | None = None) -> None:

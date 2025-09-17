@@ -45,6 +45,7 @@ class BaseEnv:
                  joint_damping: float = 0.1, 
                  enable_viewer: bool = True,
                  enable_ros_control: bool = False,
+                 imu_link_name: str | None = None,
                  noise_level: float = 0.0,
                  noise_type: str = 'uniform',
                  noise_scales: dict[str, float] = {

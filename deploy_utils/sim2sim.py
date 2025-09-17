@@ -29,7 +29,6 @@ from .math_utils import (
     quat_apply_inverse,
 )
 from .base_env import BaseEnv
-import select
 import threading
 
 class MujocoEnv(BaseEnv):
@@ -50,6 +49,7 @@ class MujocoEnv(BaseEnv):
                  align_time: bool = True,
                  align_step_size: float = 0.00005,
                  align_tolerance: float = 2.0,
+                 imu_link_name: str | None = None,
                  **kwargs):
         """
         Initialize MuJoCo environment
@@ -95,6 +95,7 @@ class MujocoEnv(BaseEnv):
         self.align_tolerance = align_tolerance
         self.init_rclpy = init_rclpy
         self.spin_timeout = spin_timeout
+        self.imu_link_name = imu_link_name
 
         # Validate control frequency
         if control_freq > simulation_freq:
@@ -137,6 +138,8 @@ class MujocoEnv(BaseEnv):
         self.joint_names = [self.model.actuator(i).name for i in range(self.model.nu)]
         # Get body names
         self.body_names = [self.model.body(i).name for i in range(self.model.nbody)]
+        # Get imu link id
+        self.imu_link_id = self.body_names.index(imu_link_name) if imu_link_name is not None else None
 
         # Initialize step frequency computation
         self.step_times = []
@@ -346,9 +349,13 @@ class MujocoEnv(BaseEnv):
         """
         Get current root data, including root orientation, and relative angular velocity.
         """
-        root_quat = torch.from_numpy(self.data.qpos[3:7].copy()).float()
-        root_ang_vel = torch.from_numpy(self.data.qvel[3:6].copy()).float()
-        root_ang_vel = quat_apply_inverse(root_quat, root_ang_vel)
+        if self.imu_link_id is None:
+            root_quat = torch.from_numpy(self.data.qpos[3:7].copy()).float()
+            root_ang_vel = torch.from_numpy(self.data.qvel[3:6].copy()).float()
+        else:
+            root_quat = torch.from_numpy(self.data.body(self.imu_link_id).xquat.copy()).float()
+            root_ang_vel = torch.from_numpy(self.data.body(self.imu_link_id).cvel[:3].copy()).float()
+            root_ang_vel = quat_apply_inverse(root_quat, root_ang_vel)
         root_rpy = torch.stack(euler_xyz_from_quat(root_quat.view(1, 4)), dim=-1).view(-1)
 
         return {
@@ -377,12 +384,12 @@ class MujocoEnv(BaseEnv):
             quat = self.data.xquat[i].copy()
             
             # Get body velocity (linear and angular)
-            vel = self.data.cvel[i].copy()  # [linear_vel, angular_vel]
+            vel = self.data.cvel[i].copy()  # [angular_vel, linear_vel]
             
             body_positions.append(pos)
             body_orientations.append(quat)
-            body_velocities.append(vel[:3])  # Linear velocity
-            body_angular_velocities.append(vel[3:])  # Angular velocity
+            body_velocities.append(vel[3:])  # Linear velocity
+            body_angular_velocities.append(vel[:3])  # Angular velocity
         
         return {
             'body_pos': torch.from_numpy(np.array(body_positions)).float(),

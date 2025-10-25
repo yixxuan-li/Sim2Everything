@@ -166,6 +166,8 @@ class MotionSwitcher:
                  num_futures: int = 5,
                  future_dt: float = 0.1,
                  initial_motion_id: int = 0,
+                 initial_motion_time: float = 0.0,
+                 motion_progress_bar: bool = False,
                  upsample_fps: int = 50):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.motion_file = joblib.load(motion_path)
@@ -174,7 +176,7 @@ class MotionSwitcher:
             print(f"{i}: {name}")
         self.current_motion = initial_motion_id
         self._next_motion = -1
-        self.current_frame = 0
+        self._delta_motion_time = initial_motion_time
         self.chain = pk.build_chain_from_urdf(open(urdf_path).read()).to(device=self.device)
         self.joint_names = joint_names
         self.eef_links = eef_links
@@ -191,9 +193,11 @@ class MotionSwitcher:
         self._ready_to_play = False
         self._want_to_play = False
         self._dynamic = False
+        self.motion_progress_bar = motion_progress_bar
+        self._motion_progress_bar = None
 
         # compute initial motion data
-        self.current_motion_data = self._compute_motion_data(self.current_motion, 0.0)
+        self.current_motion_data = self._compute_motion_data(self.current_motion, initial_motion_time)
 
     @torch.inference_mode()
     def gaussian_filter(self, x):
@@ -249,6 +253,7 @@ class MotionSwitcher:
             rb_ang_vel = compute_angular_velocity(rb_quat[:-1], rb_quat[1:], 1/motion_data['fps'])
             rb_ang_vel = torch.cat([rb_ang_vel, rb_ang_vel[-1:]], dim=0)
             rb_ang_vel = self.gaussian_filter(rb_ang_vel)
+            rb_ang_vel = transforms.quaternion_apply(rb_quat, rb_ang_vel)
 
             motion_data['joint_pos'] = motion_data['joint_pos']
             motion_data['root_pos'] = motion_data['root_pos']
@@ -326,12 +331,16 @@ class MotionSwitcher:
             print(f"Starting to switch to motion {self._next_motion}")
             self._start_switch_time = time.monotonic()
             self._last_motion_data = deepcopy(self.current_motion_data)
-            self._next_motion_data = self._compute_motion_data(self._next_motion, 0)
+            self._next_motion_data = self._compute_motion_data(self._next_motion, self._delta_motion_time)
         if self._want_to_play:
             self._state = 'playing'
             print(f"Starting to play motion {self.current_motion}")
             self._start_play_time = time.monotonic()
             self._want_to_play = False
+            if self.motion_progress_bar:
+                self._motion_progress_bar = tqdm.tqdm(total=self.motion_file[self.motions[self.current_motion]]['length_s'], 
+                                                        desc=f"Playing motion {self.motions[self.current_motion]}",
+                                                        initial=round(self._delta_motion_time, 3))
 
     def _switching_update(self):
         self._ready_to_play = False
@@ -341,7 +350,7 @@ class MotionSwitcher:
             print(f"Finished switching to motion {self._next_motion}")
             self.current_motion = self._next_motion
             self._next_motion = -1
-            self.current_frame = 0
+            self._delta_motion_time = 0.0
             self.current_motion_data = self._next_motion_data
         else:
             ratio = switch_time / self.switch_interval
@@ -351,15 +360,17 @@ class MotionSwitcher:
     def _playing_update(self):
         self._ready_to_play = False
         self._dynamic = True
-        motion_fps = self.motion_file[self.motions[self.current_motion]]['fps']
-        play_time = time.monotonic() - self._start_play_time
+        play_time = time.monotonic() - self._start_play_time + self._delta_motion_time
+        if self.motion_progress_bar:
+            self._motion_progress_bar.update(round(play_time - self._motion_progress_bar.n, 3))
         if play_time > self.motion_file[self.motions[self.current_motion]]['length_s']:
             self._state = 'idle'
             self._dynamic = False
             print("Finished playing motion")
+            if self.motion_progress_bar:
+                self._motion_progress_bar.close()
             return
         self.current_motion_data = self._compute_motion_data(self.current_motion, play_time)
-        self.current_frame = int(play_time * motion_fps)
 
     def update(self):
         if self._state == 'idle':

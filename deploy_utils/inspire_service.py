@@ -19,7 +19,7 @@ kTopicLeftInspireState = "rt/inspire_hand/state/l"
 kTopicRightInspireState = "rt/inspire_hand/state/r"
 
 class InspireController:
-    def __init__(self, left_q_target, right_q_target, fps = 100.0):
+    def __init__(self, fps = 100.0):
         logger_mp.info("Initialize InspireController...")
         self.fps = fps
         ChannelFactoryInitialize(0)
@@ -101,9 +101,9 @@ class InspireController:
 
     def set_q_target(self, left_q_target, right_q_target):
         with self.left_q_target_array.get_lock():
-            self.left_q_target_array[:] = np.clip(int(left_q_target * 1000), 0, 1000)
+            self.left_q_target_array[:] = np.clip(left_q_target * 1000, 0, 1000).astype(int)
         with self.right_q_target_array.get_lock():
-            self.right_q_target_array[:] = np.clip(int(right_q_target * 1000), 0, 1000)
+            self.right_q_target_array[:] = np.clip(right_q_target * 1000, 0, 1000).astype(int)
 
 # Update hand state, according to the official documentation, https://support.unitree.com/home/en/G1_developer/inspire_dfx_dexterous_hand
 # the state sequence is as shown in the table below

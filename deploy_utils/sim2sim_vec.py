@@ -17,12 +17,15 @@
 
 import mujoco
 import mujoco.viewer
+import mujoco_warp as mjw
+import warp as wp
 import numpy as np  
 import torch
 import time
 import sys
 import os
 import time
+from etils import epath
 from copy import deepcopy
 from .math_utils import (
     euler_xyz_from_quat,
@@ -30,6 +33,26 @@ from .math_utils import (
 )
 from .base_env import BaseEnv
 import threading
+
+
+def _load_model(path: epath.Path) -> mujoco.MjModel:
+  if not path.exists():
+    resource_path = epath.resource_path("mujoco_warp") / path
+    if not resource_path.exists():
+      raise FileNotFoundError(f"file not found: {path}\nalso tried: {resource_path}")
+    path = resource_path
+
+  if path.suffix == ".mjb":
+    return mujoco.MjModel.from_binary_path(path.as_posix())
+
+  spec = mujoco.MjSpec.from_file(path.as_posix())
+  # check if the file has any mujoco.sdf test plugins
+  if any(p.plugin_name.startswith("mujoco.sdf") for p in spec.plugins):
+    from mujoco_warp.test_data.collision_sdf.utils import register_sdf_plugins as register_sdf_plugins
+
+    register_sdf_plugins(mjw)
+
+  return spec.compile()
 
 class MujocoEnv(BaseEnv):
     simulated = True
@@ -49,6 +72,7 @@ class MujocoEnv(BaseEnv):
                  align_time: bool = True,
                  align_step_size: float = 0.00005,
                  align_tolerance: float = 2.0,
+                 env_nums: int = 3,
                  imu_link_name: str | None = None,
                  **kwargs):
         """
@@ -82,7 +106,7 @@ class MujocoEnv(BaseEnv):
                          init_rclpy=init_rclpy,
                          spin_timeout=spin_timeout,
                          **kwargs) # check kwargs
-        self.xml_path = xml_path
+        self.xml_path = epath.Path(xml_path)
         self.control_freq = control_freq
         self.simulation_freq = simulation_freq
         self.joint_armature = joint_armature
@@ -95,6 +119,7 @@ class MujocoEnv(BaseEnv):
         self.align_tolerance = align_tolerance
         self.init_rclpy = init_rclpy
         self.spin_timeout = spin_timeout
+        self.env_nums = env_nums
         self.imu_link_name = imu_link_name
 
         # Validate control frequency
@@ -105,39 +130,48 @@ class MujocoEnv(BaseEnv):
         self.decimation = int(simulation_freq / control_freq)
         
         # Load model
-        self.model = mujoco.MjModel.from_xml_path(xml_path) # type: ignore
+        # self.mj_model = mujoco.MjModel.from_xml_path(xml_path) # type: ignore
+        self.mj_model = _load_model(self.xml_path)
         # Setup simulation
         self._setup_joint_armature()
         self._setup_joint_damping(joint_damping)
+
         # Initialize data
-        self.data = mujoco.MjData(self.model) # type: ignore
-        
+        # self.mj_data = mujoco.MjData(self.mj_model) 
+        self.mj_data = mujoco.MjData(self.mj_model) # type: ignore
+
         # Setup simulation frequency
         self._setup_simulation_frequency()
+
+        
+        # Setup the mujoco_warp world
+        self.mjw_model = mjw.put_model(self.mj_model)
+        # self.mjw_data = mjw.make_data(self.mjw_model, nworld=self.env_nums)
+        self.mjw_data = mjw.put_data(self.mj_model, self.mj_data, nworld=self.env_nums, nconmax=64)
         
         # Initialize viewer if enabled
         self.viewer = None
         if self.enable_viewer:
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            self.viewer = mujoco.viewer.launch_passive(self.mj_model, self.mj_data)
         
         # State variables
         self.step_count = 0
         self.root_fixed = False
         
         # Initialize target positions (excluding root)
-        self.num_joints = self.model.nu  # Total actuators
-        self.target_positions = np.zeros(self.num_joints)
+        self.num_joints = self.mj_model.nu  # Total actuators
+        self.target_positions = np.zeros((self.env_nums, self.num_joints))
         
         # PD gains (can be modified) - now per-joint arrays
         self.kp = np.full(self.num_joints, 0.0)  # Default position gain for all joints
         self.kd = np.full(self.num_joints, 0.0)   # Default velocity gain for all joints
 
         # Get joint names
-        self._joint_names = [self.model.joint(i).name for i in range(self.model.njnt)][1:]
+        self._joint_names = [self.mj_model.joint(i).name for i in range(self.mj_model.njnt)][1:]
         # Get actuator names
-        self.joint_names = [self.model.actuator(i).name for i in range(self.model.nu)]
+        self.joint_names = [self.mj_model.actuator(i).name for i in range(self.mj_model.nu)]
         # Get body names
-        self.body_names = [self.model.body(i).name for i in range(self.model.nbody)]
+        self.body_names = [self.mj_model.body(i).name for i in range(self.mj_model.nbody)]
         self.body_name2id = {name: i for i, name in enumerate(self.body_names)}
         # Get imu link id
         self.imu_link_id = self.body_names.index(imu_link_name) if imu_link_name is not None else None
@@ -213,7 +247,7 @@ class MujocoEnv(BaseEnv):
         print(f"MuJoCo Environment initialized:")
         print(f"  Model: {xml_path}")
         print(f"  Joints: {self.num_joints} (excluding root)")
-        print(f"  Actuators: {len(self.data.ctrl)}")
+        print(f"  Actuators: {len(self.mj_data.ctrl)}")
         print(f"  Simulation frequency: {simulation_freq} Hz")
         print(f"  Control frequency: {control_freq} Hz")
         print(f"  Decimation: {self.decimation} simulation steps per control step")
@@ -231,7 +265,7 @@ class MujocoEnv(BaseEnv):
         qs = np.array([x.q for x in self._lowcmd.motor_cmd]).astype(np.float32)[:len(self.joint_order_names)]
         kps = np.array([x.kp for x in self._lowcmd.motor_cmd]).astype(np.float32)[:len(self.joint_order_names)]
         kds = np.array([x.kd for x in self._lowcmd.motor_cmd]).astype(np.float32)[:len(self.joint_order_names)]
-        self.target_positions[self.action_joints] = qs
+        self.target_positions[:, self.action_joints] = qs
         self.kp[self.action_joints] = kps
         self.kd[self.action_joints] = kds
 
@@ -258,28 +292,28 @@ class MujocoEnv(BaseEnv):
     
     def _setup_joint_armature(self):
         """Set joint armature (motor inertia) for all joints"""
-        self.model.dof_armature[:] = self.joint_armature
+        self.mj_model.dof_armature[:] = self.joint_armature
         print(f"Set joint armature to {self.joint_armature} for all joints")
     
     def _setup_joint_damping(self, damping=0.1):
         """Set joint damping for all joints"""
-        self.model.dof_damping[:] = damping
+        self.mj_model.dof_damping[:] = damping
         print(f"Set joint damping to {damping} for all joints")
     
     def _setup_simulation_frequency(self):
         """Set simulation frequency"""
         dt = 1.0 / self.simulation_freq
-        self.model.opt.timestep = dt
+        self.mj_model.opt.timestep = dt
         print(f"Set simulation frequency to {self.simulation_freq} Hz (timestep: {dt:.6f} s)")
 
     def _update_model_actuator_gains(self):
         # WARNING: This function is deprecated
         """Update MuJoCo model actuator gains if using position actuators"""
         # Check if any actuators are position actuators
-        for i in range(self.model.nu):
+        for i in range(self.mj_model.nu):
             # Update the model's actuator gains
-            self.model.actuator_gainprm[i] = self.kp[i]  # kp
-            self.model.actuator_biasprm[i] = self.kd[i]  # kd
+            self.mj_model.actuator_gainprm[i] = self.kp[i]  # kp
+            self.mj_model.actuator_biasprm[i] = self.kd[i]  # kd
         print(f"Updated model actuator gains: kp={self.kp}, kd={self.kd}")
 
     def _reset_callback(self):
@@ -296,23 +330,23 @@ class MujocoEnv(BaseEnv):
         self.step_lock.acquire()
 
         # Reset all joint positions and velocities
-        self.data.qpos[:] = self.model.qpos0[:]
-        self.data.qvel[:] = 0.0
+        wp.copy(self.mjw_data.qpos[:], wp.array([self.mj_model.qpos0[:] for i in range(self.env_nums)]))
+        wp.copy(self.mjw_data.qvel[:], wp.array([np.zeros(self.model.njnt) for i in range(self.env_nums)]))
         
         # If fix_root is True, fix the root joint to make the robot static
         if fix_root:
             # Set root position to initial position
-            self.data.qpos[0:3] = self.model.qpos0[0:3]  # x, y, z position
-            self.data.qpos[3:7] = self.model.qpos0[3:7]  # quaternion orientation
+            wp.copy(self.mjw_data.qpos[:3], wp.array([self.mj_model.qpos0[0:3] for i in range(self.env_nums)]))
+            wp.copy(self.mjw_data.qpos[3:7], wp.array([self.mj_model.qpos0[3:7] for i in range(self.env_nums)]))
             
             # Set root velocity to zero to stop any movement
-            self.data.qvel[0:6] = 0.0  # linear and angular velocity of root
+            wp.copy(self.mjw_data.qvel[:6], wp.array([np.zeros(6) for i in range(self.env_nums)]))
         
         # Reset time
         self.data.time = 0.0
         
         # Forward kinematics to update positions
-        mujoco.mj_forward(self.model, self.data) # type: ignore
+        mjw.step(self.mjw_model, self.mjw_data)
         
         # Update internal state
         self.root_fixed = fix_root
@@ -341,7 +375,7 @@ class MujocoEnv(BaseEnv):
             torch.Tensor: Body data by name
         """
         body_id = self.body_name2id[name]
-        return torch.from_numpy(np.concatenate([self.data.xpos[body_id].copy(), self.data.xquat[body_id].copy()], axis=0)).float()
+        return torch.from_numpy(np.concatenate([self.mjw_data.xpos[body_id].copy(), self.mjw_data.xquat[body_id].copy()], axis=1)).float()
 
     @BaseEnv.data_interface
     def get_joint_data(self):
@@ -352,9 +386,9 @@ class MujocoEnv(BaseEnv):
             dict: Dictionary containing joint positions, velocities.
         """
         return {
-            'joint_pos': torch.from_numpy(self.data.qpos[7:].copy()[self._joint_order]).float(),  # Joint positions (excluding root)
-            'joint_vel': torch.from_numpy(self.data.qvel[6:].copy()[self._joint_order]).float(),  # Joint velocities (excluding root)
-            'joint_cmd': torch.from_numpy(self.target_positions.copy()[self.joint_order]).float(),  # Joint commands
+            'joint_pos': torch.from_numpy(self.mjw_data.qpos[7:].copy()[self._joint_order]).float(),  # Joint positions (excluding root)
+            'joint_vel': torch.from_numpy(self.mjw_data.qvel[6:].copy()[self._joint_order]).float(),  # Joint velocities (excluding root)
+            'joint_cmd': torch.from_numpy(self.target_positions.copy()[:, self.joint_order]).float(),  # Joint commands
         }
     
     @BaseEnv.data_interface
@@ -363,13 +397,13 @@ class MujocoEnv(BaseEnv):
         Get current root data, including root orientation, and relative angular velocity.
         """
         if self.imu_link_id is None:
-            root_quat = torch.from_numpy(self.data.qpos[3:7].copy()).float()
-            root_ang_vel = torch.from_numpy(self.data.qvel[3:6].copy()).float()
+            root_quat = torch.from_numpy(self.mjw_data.qpos[3:7].copy()).float()
+            root_ang_vel = torch.from_numpy(self.mjw_data.qvel[3:6].copy()).float()
         else:
-            root_quat = torch.from_numpy(self.data.body(self.imu_link_id).xquat.copy()).float()
-            root_ang_vel = torch.from_numpy(self.data.body(self.imu_link_id).cvel[:3].copy()).float()
+            root_quat = torch.from_numpy(self.mjw_data.body(self.imu_link_id).xquat.copy()).float()
+            root_ang_vel = torch.from_numpy(self.mjw_data.body(self.imu_link_id).cvel[:3].copy()).float()
             root_ang_vel = quat_apply_inverse(root_quat, root_ang_vel)
-        root_rpy = torch.stack(euler_xyz_from_quat(root_quat.view(1, 4)), dim=-1).view(-1)
+        root_rpy = torch.stack(euler_xyz_from_quat(root_quat.view(-1, 4)), dim=-1).view(-1, 3)
 
         return {
             'root_rpy': root_rpy,  # Root euler (x, y, z)
@@ -377,6 +411,40 @@ class MujocoEnv(BaseEnv):
             'root_ang_vel': root_ang_vel,  # Root angular velocity
         }
     
+    # @BaseEnv.data_interface
+    # def get_body_data(self):
+    #     """
+    #     Get current body data
+        
+    #     Returns:
+    #         dict: Dictionary containing body positions, orientations, and velocities
+    #     """
+    #     # Get body positions and orientations
+    #     body_positions = []
+    #     body_orientations = []
+    #     body_velocities = []
+    #     body_angular_velocities = []
+        
+    #     for i in range(self.model.nbody):
+    #         # Get body position and orientation
+    #         pos = self.data.xpos[i].copy()
+    #         quat = self.data.xquat[i].copy()
+            
+    #         # Get body velocity (linear and angular)
+    #         vel = self.data.cvel[i].copy()  # [angular_vel, linear_vel]
+            
+    #         body_positions.append(pos)
+    #         body_orientations.append(quat)
+    #         body_velocities.append(vel[3:])  # Linear velocity
+    #         body_angular_velocities.append(vel[:3])  # Angular velocity
+        
+    #     return {
+    #         'body_pos': torch.from_numpy(np.array(body_positions)).float(),
+    #         'body_quat': torch.from_numpy(np.array(body_orientations)).float(),
+    #         'body_lin_vel': torch.from_numpy(np.array(body_velocities)).float(),
+    #         'body_ang_vel': torch.from_numpy(np.array(body_angular_velocities)).float(),
+    #     }
+
     @BaseEnv.data_interface
     def get_body_data(self):
         """
@@ -385,30 +453,30 @@ class MujocoEnv(BaseEnv):
         Returns:
             dict: Dictionary containing body positions, orientations, and velocities
         """
-        # Get body positions and orientations
-        body_positions = []
-        body_orientations = []
-        body_velocities = []
-        body_angular_velocities = []
+        # # Get body positions and orientations
+        # body_positions = []
+        # body_orientations = []
+        # body_velocities = []
+        # body_angular_velocities = []
         
-        for i in range(self.model.nbody):
-            # Get body position and orientation
-            pos = self.data.xpos[i].copy()
-            quat = self.data.xquat[i].copy()
+        # for i in range(self.model.nbody):
+        #     # Get body position and orientation
+        #     pos = self.data.xpos[i].copy()
+        #     quat = self.data.xquat[i].copy()
             
-            # Get body velocity (linear and angular)
-            vel = self.data.cvel[i].copy()  # [angular_vel, linear_vel]
+        #     # Get body velocity (linear and angular)
+        #     vel = self.data.cvel[i].copy()  # [angular_vel, linear_vel]
             
-            body_positions.append(pos)
-            body_orientations.append(quat)
-            body_velocities.append(vel[3:])  # Linear velocity
-            body_angular_velocities.append(vel[:3])  # Angular velocity
+        #     body_positions.append(pos)
+        #     body_orientations.append(quat)
+        #     body_velocities.append(vel[3:])  # Linear velocity
+        #     body_angular_velocities.append(vel[:3])  # Angular velocity
         
         return {
-            'body_pos': torch.from_numpy(np.array(body_positions)).float(),
-            'body_quat': torch.from_numpy(np.array(body_orientations)).float(),
-            'body_lin_vel': torch.from_numpy(np.array(body_velocities)).float(),
-            'body_ang_vel': torch.from_numpy(np.array(body_angular_velocities)).float(),
+            'body_pos': torch.from_numpy(self.mjw_data.xpos.copy().numpy()).float(),
+            'body_quat': torch.from_numpy(self.mjw_data.xquat.copy().numpy()).float(),
+            'body_lin_vel': torch.from_numpy(self.mjw_data.cvel.copy().numpy()[:, 3:]).float(),
+            'body_ang_vel': torch.from_numpy(self.mjw_data.cvel.copy().numpy()[:, :3]).float(),
         }
 
     def set_pd_gains(self, kp=None, kd=None):
@@ -490,17 +558,17 @@ class MujocoEnv(BaseEnv):
     def apply_pd_control(self):
         """Apply PD control using current target positions and PD gains"""
         # Get current joint positions and velocities (excluding root)
-        current_positions = self.data.qpos[7:].copy()[self._joint_order]  # Joint positions (excluding root)
-        current_velocities = self.data.qvel[6:].copy()[self._joint_order]  # Joint velocities (excluding root)
-        
+        current_positions = self.mjw_data.qpos.numpy()[:, 7:].copy()[:, self._joint_order]  # Joint positions (excluding root)
+        current_velocities = self.mjw_data.qvel.numpy()[:, 6:].copy()[:, self._joint_order]  # Joint velocities (excluding root)
+
         # Get target positions for the joints we're controlling
-        target_positions = self.target_positions[self.joint_order]
+        target_positions = self.target_positions[:, self.joint_order]
         if self.clip_action_to_torque_limit:
             p_term = (target_positions - current_positions) * self.kp[self.joint_order]
             d_term = (0.0 - current_velocities) * self.kd[self.joint_order]
             control_torques = p_term + d_term
             control_torques = np.clip(control_torques, -self.torque_limits.numpy(), self.torque_limits.numpy())
-            self.target_positions[self.joint_order] = (control_torques - d_term) / self.kp[self.joint_order] + current_positions # clip to torque limits
+            self.target_positions[:, self.joint_order] = (control_torques - d_term) / self.kp[self.joint_order] + current_positions # clip to torque limits
         
         # Compute PD control torques: tau = kp * (target_pos - current_pos) + kd * (0 - current_vel)
         position_errors = target_positions - current_positions
@@ -517,7 +585,8 @@ class MujocoEnv(BaseEnv):
         if self.clip_action_to_torque_limit:
             control_torques = np.clip(control_torques, -self.torque_limits.numpy(), self.torque_limits.numpy())
         # Apply torques to the actuators
-        self.data.ctrl[self.joint_order] = control_torques
+        # self.mjw_data.ctrl =  wp.array(control_torques, dtype=wp.float32)
+        self.mjw_data.ctrl =  wp.array(control_torques[:, self._joint_order], dtype=wp.float32)
 
     @property
     def step_frequency(self):
@@ -557,29 +626,30 @@ class MujocoEnv(BaseEnv):
             assert isinstance(actions, np.ndarray)
             if len(actions) != len(self.action_joints):
                 raise ValueError(f"Expected actions array of length {len(self.action_joints)}, got {len(actions)}")
-            self.target_positions[self.action_joints] = actions.copy()
-        
+            self.target_positions[:, self.action_joints] = actions.copy()
+
         # Run decimation number of simulation steps
         for _ in range(self.decimation):
             # If root is fixed, keep it at the initial position
             if self.root_fixed:
-                self.data.qpos[0:7] = self.model.qpos0[0:7]  # Keep root position and orientation fixed
-                self.data.qvel[0:6] = 0.0  # Keep root velocity at zero
+                self.mjw_data.qpos[:, 0:7] = self.mjw_model.qpos0[:, 0:7]  # Keep root position and orientation fixed
+                self.mjw_data.qvel[:, 0:6] = 0.0  # Keep root velocity at zero
 
             # Forward model
-            mujoco.mj_forward(self.model, self.data) # type: ignore
-            
+            mjw.step(self.mjw_model, self.mjw_data)
+            # mujoco.mj_forward(self.model, self.data) # type: ignore
+
             # Apply PD control
             self.apply_pd_control()
-            
+
             # Check for simulation instability
-            if np.any(np.isnan(self.data.qacc)) or np.any(np.isinf(self.data.qacc)):
+            if np.any(np.isnan(self.mjw_data.qacc.numpy())) or np.any(np.isinf(self.mjw_data.qacc.numpy())):
                 print("Warning: Simulation becoming unstable, resetting...")
                 self.reset(fix_root=self.root_fixed)
                 return True
             
             # Step simulation
-            mujoco.mj_step(self.model, self.data) # type: ignore
+            mjw.step(self.mjw_model, self.mjw_data)
 
             # Publish lowstate
             if self.enable_ros_control:
@@ -592,6 +662,7 @@ class MujocoEnv(BaseEnv):
             
         # Update step count
         self.step_count += 1
+        print(self.step_count)
 
         # Reset if needed
         if self.need_reset:
@@ -627,12 +698,12 @@ class MujocoEnv(BaseEnv):
             range_min: Minimum value for random targets
             range_max: Maximum value for random targets
         """
-        self.target_positions = np.random.uniform(range_min, range_max, self.num_joints)
+        self.target_positions = np.random.uniform(range_min, range_max, (self.env_nums, self.num_joints))
         print(f"Set random target positions (range: {range_min} to {range_max})")
     
     def _set_zero_targets(self):
         """Set all target positions to zero"""
-        self.target_positions = np.zeros(self.num_joints)
+        self.target_positions = np.zeros((self.env_nums, self.num_joints))
         print("Set zero target positions")
 
     def show_help(self):
@@ -710,15 +781,15 @@ def main():
     """Main function to run the simulation"""
     abs_path = os.path.abspath(__file__)
     abs_dir = os.path.dirname(abs_path)
-
+    # xml_path=os.path.join(abs_dir, '/home/yixuan/Project/Latent-Deploy/assets/g1_29dof_rev_1_0_vec.xml'),
     # Create environment
     env = MujocoEnv(
-        xml_path=os.path.join(abs_dir, 'assets/h1_2.xml'),
+        xml_path=os.path.join(abs_dir, '/home/yixuan/Project/Latent-Deploy/assets/scene_29dof.xml'),
         simulation_freq=1000,
         control_freq=50,
         joint_armature=0.1,
         joint_damping=1.0,
-        enable_viewer=True
+        enable_viewer=False
     )
     
     # Run simulation
@@ -730,4 +801,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

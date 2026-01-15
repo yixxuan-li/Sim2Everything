@@ -54,7 +54,7 @@ def _load_model(path: epath.Path) -> mujoco.MjModel:
 
   return spec.compile()
 
-class MujocoEnv(BaseEnv):
+class MujocoVecEnv(BaseEnv):
     simulated = True
 
     def __init__(self, control_freq: int = 100, 

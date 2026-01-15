@@ -72,7 +72,7 @@ class MujocoEnv(BaseEnv):
                  align_time: bool = True,
                  align_step_size: float = 0.00005,
                  align_tolerance: float = 2.0,
-                 env_nums: int = 3,
+                 env_nums: int = 5,
                  imu_link_name: str | None = None,
                  **kwargs):
         """
@@ -650,19 +650,20 @@ class MujocoEnv(BaseEnv):
             
             # Step simulation
             mjw.step(self.mjw_model, self.mjw_data)
+            if self.enable_viewer:
+                self.mj_data.ctrl = self.mjw_data.ctrl.numpy()[0, :]
+                mujoco.mj_step(self.mj_model, self.mj_data) # type: ignore
 
             # Publish lowstate
             if self.enable_ros_control:
                 self._publish_lowstate()
             
-            # self.viewer.sync()
             # Sync viewer if enabled (only on the last step to avoid excessive syncing)
             if self.viewer is not None and _ == self.decimation - 1:
                 self.viewer.sync()
             
         # Update step count
         self.step_count += 1
-        print(self.step_count)
 
         # Reset if needed
         if self.need_reset:

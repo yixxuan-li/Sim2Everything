@@ -72,7 +72,7 @@ class MujocoVecEnv(BaseEnv):
                  align_time: bool = True,
                  align_step_size: float = 0.00005,
                  align_tolerance: float = 2.0,
-                 env_nums: int = 5,
+                 num_envs: int = 5,
                  imu_link_name: str | None = None,
                  **kwargs):
         """
@@ -119,7 +119,7 @@ class MujocoVecEnv(BaseEnv):
         self.align_tolerance = align_tolerance
         self.init_rclpy = init_rclpy
         self.spin_timeout = spin_timeout
-        self.env_nums = env_nums
+        self.num_envs = num_envs
         self.imu_link_name = imu_link_name
 
         # Validate control frequency
@@ -146,8 +146,8 @@ class MujocoVecEnv(BaseEnv):
         
         # Setup the mujoco_warp world
         self.mjw_model = mjw.put_model(self.mj_model)
-        # self.mjw_data = mjw.make_data(self.mjw_model, nworld=self.env_nums)
-        self.mjw_data = mjw.put_data(self.mj_model, self.mj_data, nworld=self.env_nums, nconmax=64)
+        # self.mjw_data = mjw.make_data(self.mjw_model, nworld=self.num_envs)
+        self.mjw_data = mjw.put_data(self.mj_model, self.mj_data, nworld=self.num_envs, nconmax=64)
         
         # Initialize viewer if enabled
         self.viewer = None
@@ -160,7 +160,7 @@ class MujocoVecEnv(BaseEnv):
         
         # Initialize target positions (excluding root)
         self.num_joints = self.mj_model.nu  # Total actuators
-        self.target_positions = np.zeros((self.env_nums, self.num_joints))
+        self.target_positions = np.zeros((self.num_envs, self.num_joints))
         
         # PD gains (can be modified) - now per-joint arrays
         self.kp = np.full(self.num_joints, 0.0)  # Default position gain for all joints
@@ -330,17 +330,17 @@ class MujocoVecEnv(BaseEnv):
         self.step_lock.acquire()
 
         # Reset all joint positions and velocities
-        wp.copy(self.mjw_data.qpos[:], wp.array([self.mj_model.qpos0[:] for i in range(self.env_nums)]))
-        wp.copy(self.mjw_data.qvel[:], wp.array([np.zeros(self.model.njnt) for i in range(self.env_nums)]))
+        wp.copy(self.mjw_data.qpos[:], wp.array([self.mj_model.qpos0[:] for i in range(self.num_envs)]))
+        wp.copy(self.mjw_data.qvel[:], wp.array([np.zeros(self.model.njnt) for i in range(self.num_envs)]))
         
         # If fix_root is True, fix the root joint to make the robot static
         if fix_root:
             # Set root position to initial position
-            wp.copy(self.mjw_data.qpos[:3], wp.array([self.mj_model.qpos0[0:3] for i in range(self.env_nums)]))
-            wp.copy(self.mjw_data.qpos[3:7], wp.array([self.mj_model.qpos0[3:7] for i in range(self.env_nums)]))
+            wp.copy(self.mjw_data.qpos[:3], wp.array([self.mj_model.qpos0[0:3] for i in range(self.num_envs)]))
+            wp.copy(self.mjw_data.qpos[3:7], wp.array([self.mj_model.qpos0[3:7] for i in range(self.num_envs)]))
             
             # Set root velocity to zero to stop any movement
-            wp.copy(self.mjw_data.qvel[:6], wp.array([np.zeros(6) for i in range(self.env_nums)]))
+            wp.copy(self.mjw_data.qvel[:6], wp.array([np.zeros(6) for i in range(self.num_envs)]))
         
         # Reset time
         self.data.time = 0.0
@@ -699,12 +699,12 @@ class MujocoVecEnv(BaseEnv):
             range_min: Minimum value for random targets
             range_max: Maximum value for random targets
         """
-        self.target_positions = np.random.uniform(range_min, range_max, (self.env_nums, self.num_joints))
+        self.target_positions = np.random.uniform(range_min, range_max, (self.num_envs, self.num_joints))
         print(f"Set random target positions (range: {range_min} to {range_max})")
     
     def _set_zero_targets(self):
         """Set all target positions to zero"""
-        self.target_positions = np.zeros((self.env_nums, self.num_joints))
+        self.target_positions = np.zeros((self.num_envs, self.num_joints))
         print("Set zero target positions")
 
     def show_help(self):

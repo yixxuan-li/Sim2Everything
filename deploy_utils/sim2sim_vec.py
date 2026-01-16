@@ -105,6 +105,7 @@ class MujocoVecEnv(BaseEnv):
                          align_tolerance=align_tolerance,
                          init_rclpy=init_rclpy,
                          spin_timeout=spin_timeout,
+                         launch_input_thread=False,
                          **kwargs) # check kwargs
         self.xml_path = epath.Path(xml_path)
         self.control_freq = control_freq
@@ -386,8 +387,8 @@ class MujocoVecEnv(BaseEnv):
             dict: Dictionary containing joint positions, velocities.
         """
         return {
-            'joint_pos': torch.from_numpy(self.mjw_data.qpos[7:].copy()[self._joint_order]).float(),  # Joint positions (excluding root)
-            'joint_vel': torch.from_numpy(self.mjw_data.qvel[6:].copy()[self._joint_order]).float(),  # Joint velocities (excluding root)
+            'joint_pos': torch.from_numpy(self.mjw_data.qpos[:, 7:].copy()[self._joint_order]).float(),  # Joint positions (excluding root)
+            'joint_vel': torch.from_numpy(self.mjw_data.qvel[:, 6:].copy()[self._joint_order]).float(),  # Joint velocities (excluding root)
             'joint_cmd': torch.from_numpy(self.target_positions.copy()[:, self.joint_order]).float(),  # Joint commands
         }
     
@@ -397,11 +398,11 @@ class MujocoVecEnv(BaseEnv):
         Get current root data, including root orientation, and relative angular velocity.
         """
         if self.imu_link_id is None:
-            root_quat = torch.from_numpy(self.mjw_data.qpos[3:7].copy()).float()
-            root_ang_vel = torch.from_numpy(self.mjw_data.qvel[3:6].copy()).float()
+            root_quat = torch.from_numpy(self.mjw_data.qpos[:, 3:7].copy()).float()
+            root_ang_vel = torch.from_numpy(self.mjw_data.qvel[:, 3:6].copy()).float()
         else:
             root_quat = torch.from_numpy(self.mjw_data.body(self.imu_link_id).xquat.copy()).float()
-            root_ang_vel = torch.from_numpy(self.mjw_data.body(self.imu_link_id).cvel[:3].copy()).float()
+            root_ang_vel = torch.from_numpy(self.mjw_data.body(self.imu_link_id).cvel[:, :3].copy()).float()
             root_ang_vel = quat_apply_inverse(root_quat, root_ang_vel)
         root_rpy = torch.stack(euler_xyz_from_quat(root_quat.view(-1, 4)), dim=-1).view(-1, 3)
 

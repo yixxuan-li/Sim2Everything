@@ -785,13 +785,14 @@ def main():
     abs_dir = os.path.dirname(abs_path)
     # xml_path=os.path.join(abs_dir, '/home/yixuan/Project/Latent-Deploy/assets/g1_29dof_rev_1_0_vec.xml'),
     # Create environment
-    env = MujocoEnv(
+    env = MujocoVecEnv(
         xml_path=os.path.join(abs_dir, '/home/yixuan/Project/Latent-Deploy/assets/scene_29dof.xml'),
         simulation_freq=1000,
         control_freq=50,
         joint_armature=0.1,
         joint_damping=1.0,
-        enable_viewer=False
+        enable_viewer=False,
+        num_envs=1000
     )
     
     # Run simulation

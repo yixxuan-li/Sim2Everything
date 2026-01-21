@@ -238,7 +238,7 @@ class MotionSwitcher:
 
             root_pos = motion_data['root_pos']
             initial_root_pos = root_pos[0:1].clone()
-            initial_root_pos[:, 2] = 0.0
+            initial_root_pos[:, 2] = -0.1
             root_pos = root_pos - initial_root_pos
             root_quat = motion_data['root_quat']
             root_quat_yaw_inv = math_utils.quat_conjugate(math_utils.yaw_quat(root_quat[0:1]))
@@ -278,6 +278,7 @@ class MotionSwitcher:
         motion_joint_pos = motion_data['joint_pos'][frame_floor] * (1 - ratio) + motion_data['joint_pos'][frame_ceil] * ratio
         motion_rb_pos = motion_data['rb_pos'][frame_floor] * (1 - ratio) + motion_data['rb_pos'][frame_ceil] * ratio
         motion_rb_quat = motion_data['rb_quat'][frame_floor] * (1 - ratio) + motion_data['rb_quat'][frame_ceil] * ratio
+        motion_rb_quat = motion_rb_quat / (motion_rb_quat.norm(dim=-1, keepdim=True) + 1e-6)
         motion_rb_lin_vel = motion_data['rb_lin_vel'][frame_floor] * (1 - ratio) + motion_data['rb_lin_vel'][frame_ceil] * ratio
         motion_rb_ang_vel = motion_data['rb_ang_vel'][frame_floor] * (1 - ratio) + motion_data['rb_ang_vel'][frame_ceil] * ratio
         return motion_joint_pos, motion_rb_pos, motion_rb_quat, motion_rb_lin_vel, motion_rb_ang_vel
@@ -366,6 +367,7 @@ class MotionSwitcher:
         if play_time > self.motion_file[self.motions[self.current_motion]]['length_s']:
             self._state = 'idle'
             self._dynamic = False
+            self._delta_motion_time = 0.0
             print("Finished playing motion")
             if self.motion_progress_bar:
                 self._motion_progress_bar.close()
@@ -387,4 +389,4 @@ class MotionSwitcher:
             while time.monotonic() - last_time < step_dt:
                 time.sleep(0.001)
             self.update()
-            
+            last_time = time.monotonic()

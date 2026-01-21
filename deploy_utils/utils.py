@@ -104,7 +104,7 @@ def compute_angular_velocity(q_prev, q_next, dt, eps=1e-8):
     axis = q_rel[..., 1:] / (sin_half + eps)
     return (angle / dt) * axis * (sin_half > eps)
 
-from typing import Literal
+from typing import Any, Literal
 class MotionSwitcher:
     """
     A motion switching system for robotic character animation with smooth transitions.
@@ -221,15 +221,21 @@ class MotionSwitcher:
         return new_motion_data
 
     def _build_motion_data(self):
-        for id, motion in enumerate(tqdm.tqdm(self.motions)):
+        for id, motion in enumerate[Any](tqdm.tqdm(self.motions)):
             raw_motion_data = self.motion_file[motion]
             motion_data = dict()
             motion_data['joint_pos'] = torch.from_numpy(raw_motion_data['dof'] if 'dof' in raw_motion_data else raw_motion_data['joint_pos']).float().to(self.device)
             motion_data['root_pos'] = torch.from_numpy(raw_motion_data['root_trans_offset'] if 'root_trans_offset' in raw_motion_data else raw_motion_data['root_pos']).float().to(self.device)
             motion_data['root_quat'] = torch.from_numpy(raw_motion_data['root_rot'] if 'root_rot' in raw_motion_data else raw_motion_data['root_quat']).float().to(self.device)
+            if 'fps' in raw_motion_data and int(raw_motion_data['fps']) == self.upsample_fps:
+                motion_data['fps'] = raw_motion_data['fps']
+                motion_data['length'] = motion_data['joint_pos'].shape[0]
+                motion_data['length_s'] = motion_data['joint_pos'].shape[0]
+            elif 'fps' in raw_motion_data and int(raw_motion_data['fps']) < self.upsample_fps:
+                motion_data = self.upsample_motion_data(motion_data, raw_motion_data['fps'], self.upsample_fps)
+
             if self.motion_quat_convention == "xyzw":
                 motion_data['root_quat'] = math_utils.convert_quat(motion_data['root_quat'], to="wxyz")
-            motion_data = self.upsample_motion_data(motion_data, raw_motion_data['fps'], self.upsample_fps)
 
             motion_joint_vel = torch.gradient(motion_data['joint_pos'], spacing=1/motion_data['fps'], dim=0)[0]
             motion_joint_vel = self.gaussian_filter(motion_joint_vel)

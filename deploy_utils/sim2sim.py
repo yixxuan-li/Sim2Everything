@@ -588,6 +588,8 @@ class MujocoEnv(BaseEnv):
             # self.viewer.sync()
             # Sync viewer if enabled (only on the last step to avoid excessive syncing)
             if self.viewer is not None and _ == self.decimation - 1:
+                pelvis_pos = self.data.xpos[self.model.body("pelvis").id]
+                self.viewer.cam.lookat = pelvis_pos
                 self.viewer.sync()
             
         # Update step count

@@ -227,12 +227,12 @@ class MotionSwitcher:
             motion_data['joint_pos'] = torch.from_numpy(raw_motion_data['dof'] if 'dof' in raw_motion_data else raw_motion_data['joint_pos']).float().to(self.device)
             motion_data['root_pos'] = torch.from_numpy(raw_motion_data['root_trans_offset'] if 'root_trans_offset' in raw_motion_data else raw_motion_data['root_pos']).float().to(self.device)
             motion_data['root_quat'] = torch.from_numpy(raw_motion_data['root_rot'] if 'root_rot' in raw_motion_data else raw_motion_data['root_quat']).float().to(self.device)
-            if 'fps' in raw_motion_data and int(raw_motion_data['fps']) == self.upsample_fps:
-                motion_data['fps'] = raw_motion_data['fps']
-                motion_data['length'] = motion_data['joint_pos'].shape[0]
-                motion_data['length_s'] = motion_data['joint_pos'].shape[0]
-            elif 'fps' in raw_motion_data and int(raw_motion_data['fps']) < self.upsample_fps:
-                motion_data = self.upsample_motion_data(motion_data, raw_motion_data['fps'], self.upsample_fps)
+            # if 'fps' in raw_motion_data and int(raw_motion_data['fps']) == self.upsample_fps:
+            motion_data['fps'] = raw_motion_data['fps']
+            motion_data['length'] = motion_data['joint_pos'].shape[0]
+            motion_data['length_s'] = motion_data['joint_pos'].shape[0]
+            # elif 'fps' in raw_motion_data and int(raw_motion_data['fps']) < self.upsample_fps:
+            #     motion_data = self.upsample_motion_data(motion_data, raw_motion_data['fps'], self.upsample_fps)
 
             if self.motion_quat_convention == "xyzw":
                 motion_data['root_quat'] = math_utils.convert_quat(motion_data['root_quat'], to="wxyz")
@@ -255,10 +255,10 @@ class MotionSwitcher:
             rb_pos = transforms.quaternion_apply(root_quat.unsqueeze(1), torch.stack([eef_matrix[:, :3, 3] for eef_matrix in eef_matrices], dim=1)) + root_pos.unsqueeze(1)
             rb_quat = transforms.quaternion_multiply(root_quat.unsqueeze(1), torch.stack([math_utils.quat_from_matrix(eef_matrix[:, :3, :3]) for eef_matrix in eef_matrices], dim=1))
             rb_lin_vel = torch.gradient(rb_pos, spacing=1/motion_data['fps'], dim=0)[0]
-            rb_lin_vel = self.gaussian_filter(rb_lin_vel)
+            # rb_lin_vel = self.gaussian_filter(rb_lin_vel)
             rb_ang_vel = compute_angular_velocity(rb_quat[:-1], rb_quat[1:], 1/motion_data['fps'])
             rb_ang_vel = torch.cat([rb_ang_vel, rb_ang_vel[-1:]], dim=0)
-            rb_ang_vel = self.gaussian_filter(rb_ang_vel)
+            # rb_ang_vel = self.gaussian_filter(rb_ang_vel)
             rb_ang_vel = transforms.quaternion_apply(rb_quat, rb_ang_vel)
 
             motion_data['joint_pos'] = motion_data['joint_pos']
@@ -276,21 +276,34 @@ class MotionSwitcher:
                     motion_data[k] = v.cpu()
 
     def _compute_motion_data_at_time(self, motion_id, time):
+        # motion_data = self.motion_file[self.motions[motion_id]]
+        # motion_frac = time * motion_data['fps']
+        # frame_floor = min(int(motion_frac), motion_data['length'] - 1)
+        # frame_ceil = min(int(motion_frac + 1), motion_data['length'] - 1)
+        # ratio = motion_frac - frame_floor
+        # motion_joint_pos = motion_data['joint_pos'][frame_floor] * (1 - ratio) + motion_data['joint_pos'][frame_ceil] * ratio
+        # motion_rb_pos = motion_data['rb_pos'][frame_floor] * (1 - ratio) + motion_data['rb_pos'][frame_ceil] * ratio
+        # motion_rb_quat = motion_data['rb_quat'][frame_floor] * (1 - ratio) + motion_data['rb_quat'][frame_ceil] * ratio
+        # motion_rb_quat = motion_rb_quat / (motion_rb_quat.norm(dim=-1, keepdim=True) + 1e-6)
+        # motion_rb_lin_vel = motion_data['rb_lin_vel'][frame_floor] * (1 - ratio) + motion_data['rb_lin_vel'][frame_ceil] * ratio
+        # motion_rb_ang_vel = motion_data['rb_ang_vel'][frame_floor] * (1 - ratio) + motion_data['rb_ang_vel'][frame_ceil] * ratio
+        time = min(time, self.motion_file[self.motions[motion_id]]['length'] - 1)
         motion_data = self.motion_file[self.motions[motion_id]]
-        motion_frac = time * motion_data['fps']
-        frame_floor = min(int(motion_frac), motion_data['length'] - 1)
-        frame_ceil = min(int(motion_frac + 1), motion_data['length'] - 1)
-        ratio = motion_frac - frame_floor
-        motion_joint_pos = motion_data['joint_pos'][frame_floor] * (1 - ratio) + motion_data['joint_pos'][frame_ceil] * ratio
-        motion_rb_pos = motion_data['rb_pos'][frame_floor] * (1 - ratio) + motion_data['rb_pos'][frame_ceil] * ratio
-        motion_rb_quat = motion_data['rb_quat'][frame_floor] * (1 - ratio) + motion_data['rb_quat'][frame_ceil] * ratio
+        motion_joint_pos = motion_data['joint_pos'][time]
+        motion_rb_pos = motion_data['rb_pos'][time]
+        motion_rb_quat = motion_data['rb_quat'][time]
         motion_rb_quat = motion_rb_quat / (motion_rb_quat.norm(dim=-1, keepdim=True) + 1e-6)
-        motion_rb_lin_vel = motion_data['rb_lin_vel'][frame_floor] * (1 - ratio) + motion_data['rb_lin_vel'][frame_ceil] * ratio
-        motion_rb_ang_vel = motion_data['rb_ang_vel'][frame_floor] * (1 - ratio) + motion_data['rb_ang_vel'][frame_ceil] * ratio
+        motion_rb_lin_vel = motion_data['rb_lin_vel'][time]
+        motion_rb_ang_vel = motion_data['rb_ang_vel'][time]
         return motion_joint_pos, motion_rb_pos, motion_rb_quat, motion_rb_lin_vel, motion_rb_ang_vel
 
     def _compute_motion_data(self, motion_id, time):
-        futures = [time + i * self.future_dt for i in range(self.num_futures)]
+        # futures = [time + i * self.future_dt for i in range(self.num_futures)]
+        # datas = [self._compute_motion_data_at_time(motion_id, future) for future in futures]
+        # results = [torch.stack(data, dim=0) for data in zip(*datas)]
+
+        current_frame = round(time * self.motion_file[self.motions[motion_id]]['fps'])
+        futures = [current_frame + i for i in range(self.num_futures)]
         datas = [self._compute_motion_data_at_time(motion_id, future) for future in futures]
         results = [torch.stack(data, dim=0) for data in zip(*datas)]
         return results

@@ -29,7 +29,7 @@ class BaseEnv:
                  align_tolerance: float = 2.0,
                  init_rclpy: bool = True,
                  spin_timeout: float = 0.001,
-                 launch_input_thread: bool = True,
+                 launch_input_thread: bool = False,
                  simulated_state: bool = False,
                  fk_urdf_path: str | None = None,
                  fk_xml_path: str | None = None,

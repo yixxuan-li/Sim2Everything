@@ -196,6 +196,7 @@ class MotionSwitcher:
         self.motion_progress_bar = motion_progress_bar
         self._motion_progress_bar = None
 
+        self.motion_finished = False
         # compute initial motion data
         self.current_motion_data = self._compute_motion_data(self.current_motion, initial_motion_time)
 
@@ -306,6 +307,9 @@ class MotionSwitcher:
         futures = [current_frame + i for i in range(self.num_futures)]
         datas = [self._compute_motion_data_at_time(motion_id, future) for future in futures]
         results = [torch.stack(data, dim=0) for data in zip(*datas)]
+
+        if current_frame >= self.motion_file[self.motions[motion_id]]['length'] - self.num_futures + 1:
+            self.motion_finished = True
         return results
 
     def get_motion_data(self):

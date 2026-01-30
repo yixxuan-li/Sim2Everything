@@ -171,6 +171,7 @@ class MotionSwitcher:
                  upsample_fps: int = 50):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.motion_file = joblib.load(motion_path)
+        self.motion_file = {motion_path.split('/')[-1]: self.motion_file}
         self.motions = list(self.motion_file.keys())
         for i, name in enumerate(self.motions):
             print(f"{i}: {name}")
